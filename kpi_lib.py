@@ -109,9 +109,12 @@ def build_kpi(spark: SparkSession, periodo: str = None) -> DataFrame:
                                                             sum(col('LUCRO')).alias('LUCRO'), \
                                                             sum(col('MARGEM')).alias('MARGEM')).distinct()
 
-    # juntando com a part_eventos
-    valor = valor.join(part_eventos, on = ['CPF','MARCA','ANO','MES'], how = 'left')
-    valor = valor.join(base_influenciada, on = ['CPF','MARCA','ANO','MES'], how = 'left')
+    # repartir e persistir 'valor' (cache) para reduzir shuffle em joins/operacoes posteriores
+    valor = valor.repartition('CPF', 'MARCA').persist()
+
+    # juntando com a part_eventos (broadcast) e base_influenciada
+    valor = valor.join(F.broadcast(part_eventos), on=['CPF','MARCA','ANO','MES'], how='left')
+    valor = valor.join(base_influenciada, on=['CPF','MARCA','ANO','MES'], how='left')
 
     #DIMENSAO
     #join TEMPO e CLIENTE
@@ -126,35 +129,20 @@ def build_kpi(spark: SparkSession, periodo: str = None) -> DataFrame:
     #join VALOR
     dimensao = dimensao.join(valor, on = ['CPF','MARCA', 'ANO', 'MES'], how = 'left')
     
+    # repartition + persist em dimensao antes das janelas pesadas e liberar 'valor' da memoria
+    dimensao = dimensao.repartition('CPF', 'MARCA').persist()
+    valor.unpersist()
     
     #Tratativas
     dimensao = dimensao.filter(col('CPF').isNotNull())
-    dimensao = dimensao.withColumn('VLF_FP', when(col('VLF_FP').isNull(), 0).otherwise(col('VLF_FP')))
-    dimensao = dimensao.withColumn('VLF', when(col('VLF').isNull(), 0).otherwise(col('VLF')))
-    dimensao = dimensao.withColumn('VLF_OFF', when(col('VLF_OFF').isNull(), 0).otherwise(col('VLF_OFF')))
-    dimensao = dimensao.withColumn('VLF_FRANQUIA', when(col('VLF_FRANQUIA').isNull(), 0).otherwise(col('VLF_FRANQUIA')))
-    dimensao = dimensao.withColumn('VLF_ON', when(col('VLF_ON').isNull(), 0).otherwise(col('VLF_ON')))
-    dimensao = dimensao.withColumn('VLF_MD', when(col('VLF_MD').isNull(), 0).otherwise(col('VLF_MD')))
-    dimensao = dimensao.withColumn('VLF_EC', when(col('VLF_EC').isNull(), 0).otherwise(col('VLF_EC')))
-    dimensao = dimensao.withColumn('QLF', when(col('QLF').isNull(), 0).otherwise(col('QLF')))
-    dimensao = dimensao.withColumn('QLF_FP', when(col('QLF_FP').isNull(), 0).otherwise(col('QLF_FP')))
-    dimensao = dimensao.withColumn('QLF_MD', when(col('QLF_MD').isNull(), 0).otherwise(col('QLF_MD')))
-    dimensao = dimensao.withColumn('QLF_EC', when(col('QLF_EC').isNull(), 0).otherwise(col('QLF_EC')))
-    dimensao = dimensao.withColumn('LUCRO', when(col('LUCRO').isNull(), 0).otherwise(col('LUCRO')))
-    dimensao = dimensao.withColumn('MARGEM', when(col('MARGEM').isNull(), 0).otherwise(col('MARGEM')))
-    dimensao = dimensao.withColumn('TICKET_MEDIO', when(col('TICKET_MEDIO').isNull(), 0).otherwise(col('TICKET_MEDIO')))
-    dimensao = dimensao.withColumn('PRECO_MEDIO', when(col('PRECO_MEDIO').isNull(), 0).otherwise(col('PRECO_MEDIO')))
-    dimensao = dimensao.withColumn('PA', when(col('PA').isNull(), 0).otherwise(col('PA')))
-    dimensao = dimensao.withColumn('QT_TICKET', when(col('QT_TICKET').isNull(), 0).otherwise(col('QT_TICKET')))
-    dimensao = dimensao.withColumn('QT_TICKET_OFF', when(col('QT_TICKET_OFF').isNull(), 0).otherwise(col('QT_TICKET_OFF')))
-    dimensao = dimensao.withColumn('QT_TICKET_FRANQUIA', when(col('QT_TICKET_FRANQUIA').isNull(), 0).otherwise(col('QT_TICKET_FRANQUIA')))
-    dimensao = dimensao.withColumn('QT_TICKET_ON', when(col('QT_TICKET_ON').isNull(), 0).otherwise(col('QT_TICKET_ON')))
-    
-    #adicionei
-    dimensao = dimensao.withColumn('PART_EVENTOS', when(col('PART_EVENTOS').isNull(), 0).otherwise(col('PART_EVENTOS')))
-    dimensao = dimensao.withColumn('QTD_TLMKT', when(col('QTD_TLMKT').isNull(), 0).otherwise(col('QTD_TLMKT')))
-    dimensao = dimensao.withColumn('QTD_SMS', when(col('QTD_SMS').isNull(), 0).otherwise(col('QTD_SMS')))
-    dimensao = dimensao.withColumn('QTD_EMAIL', when(col('QTD_EMAIL').isNull(), 0).otherwise(col('QTD_EMAIL')))
++    # substituir várias operações de null->0 por um único fillna em colunas numéricas
++   _numeric_cols = [
++        'VLF_FP','VLF','VLF_OFF','VLF_FRANQUIA','VLF_ON','VLF_MD','VLF_EC',
++        'QLF','QLF_FP','QLF_MD','QLF_EC','LUCRO','MARGEM','TICKET_MEDIO',
++        'PRECO_MEDIO','PA','QT_TICKET','QT_TICKET_OFF','QT_TICKET_FRANQUIA',
++        'QT_TICKET_ON','PART_EVENTOS','QTD_TLMKT','QTD_SMS','QTD_EMAIL'
++    ]
++   dimensao = dimensao.fillna(0, subset=_numeric_cols)
     
     #novas colunas
     dimensao = dimensao.withColumn('PER_PECAS_REMARC', col('QLF_MD') / col('QLF'))
